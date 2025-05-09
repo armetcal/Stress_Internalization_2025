@@ -1,0 +1,264 @@
+---
+title: "Figure 1. Alpha Diversity"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Prep Data}
+library(tidyverse)
+library(phyloseq)
+library(ggpubr)
+library(haven)
+library(lavaan)
+library(manymome)
+
+meta = read_sav('../Data/CHILD_CBCL_MatDistress_Microbiome_09042024_ForAvril.sav')
+ps = readRDS('../CHILD_phyloseq_Feb25.rds')
+
+# Fix here because it's not working in the phyloseq creation script
+meta$csec[meta$csec=='NA'] = NA
+meta$csec[meta$csec==''] = NA
+table(is.na(meta$csec))
+table(meta$csec)
+
+meta$Mother_abs_birth_yn[meta$Mother_abs_birth_yn=='NA'] = NA
+meta$Mother_abs_birth_yn[meta$Mother_abs_birth_yn==''] = NA
+table(is.na(meta$Mother_abs_birth_yn))
+table(meta$Mother_abs_birth_yn)
+
+# Fix breast milk variables
+meta$bf_3m = sapply(meta$BF_3m_status_4, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='',NA,
+                                   ifelse(x=='Never breastfed','No', ifelse(x=='Zero','Prev','Yes')))))
+})
+meta$bf_3m = factor(meta$bf_3m, levels = c('No','Prev','Yes'))
+meta$bf_3m_bool = meta$bf_3m
+meta$bf_3m_bool[meta$bf_3m_bool=='Prev'] = 'No'
+meta$BF_12m[meta$BF_12m=='' | meta$BF_12m=='NA'] = NA
+meta$BF_dur = sapply(meta$BF_dur_cat2, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='Never breastfed',0,
+                                   ifelse(x=='>0-3',1, ifelse(x=='3-9',2,ifelse(x=='9-12',3,4))))))
+})
+meta = meta %>% droplevels()
+```
+
+# Mediation
+
+```{r}
+stats.med = tibble()
+```
+
+```{r 3 months}
+# UNIVARIABLE ~~~~~~~~~~~~~~~~~~~~~~~
+
+Model <-'
+ZInternalizingPercentile ~ ZShannonStool3mo 
+ZShannonStool3mo ~ ZPSS_36weeks
+'
+
+set.seed(421)
+Modelrun <- sem(Model, data=meta, fixed.x=TRUE, missing="ml")
+summary(Modelrun, standardized=TRUE,fit.measures=TRUE, rsquare=TRUE)
+
+
+ModelIE <- indirect_effect(x = "ZPSS_36weeks",
+                           y = "ZInternalizingPercentile",
+                           m = "ZShannonStool3mo",
+                           fit = Modelrun,
+                           boot_ci = TRUE,
+                           R = 500,
+                           ncores=1,
+                           seed=421)
+
+modelout = print(ModelIE,pvalue=TRUE)
+
+stats.med = rbind(stats.med,
+                  tibble(Time = '3 months',Type='Univariable',
+                   Estimate = modelout$indirect,
+                   Estimate_low = modelout$boot_ci[1],
+                   Estimate_high = modelout$boot_ci[2],
+                   Pval = modelout$boot_p,
+                   SE = modelout$boot_se)
+)
+
+# MULTIVARIABLE ~~~~~~~~~~~~~~~~~~~~~~~
+
+Model <- '
+  # Mediation paths
+  ZInternalizingPercentile ~ ZShannonStool3mo
+  ZShannonStool3mo ~ ZPSS_36weeks
+
+  # Direct paths for the predictors
+  ZShannonStool3mo ~ Mother_abs_birth_yn + csec + bf_3m_bool
+'
+
+set.seed(421)
+Modelrun <- sem(Model, data=meta, fixed.x=TRUE, missing="ml")
+summary(Modelrun, standardized=TRUE,fit.measures=TRUE, rsquare=TRUE)
+
+
+ModelIE <- indirect_effect(x = "ZPSS_36weeks",
+                           y = "ZInternalizingPercentile",
+                           m = "ZShannonStool3mo",
+                           fit = Modelrun,
+                           boot_ci = TRUE,
+                           R = 500,
+                           ncores=1,
+                           seed=421)
+
+modelout = print(ModelIE,pvalue=TRUE)
+
+stats.med = rbind(stats.med,
+                  tibble(Time = '3 months',Type='Multivariable',
+                   Estimate = modelout$indirect,
+                   Estimate_low = modelout$boot_ci[1],
+                   Estimate_high = modelout$boot_ci[2],
+                   Pval = modelout$boot_p,
+                   SE = modelout$boot_se)
+)
+```
+
+```{r 1 year}
+# UNIVARIABLE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Model <-'
+ZInternalizingPercentile ~ ZShannonStool1Yr 
+ZShannonStool1Yr ~ ZPSS_36weeks
+'
+
+set.seed(421)
+Modelrun <- sem(Model, data=meta, fixed.x=TRUE, missing="ml")
+summary(Modelrun, standardized=TRUE,fit.measures=TRUE, rsquare=TRUE)
+
+
+ModelIE <- indirect_effect(x = "ZPSS_36weeks",
+                           y = "ZInternalizingPercentile",
+                           m = "ZShannonStool1Yr",
+                           fit = Modelrun,
+                           boot_ci = TRUE,
+                           R = 500,
+                           ncores=1,
+                           seed=421)
+
+modelout = print(ModelIE,pvalue=TRUE)
+
+stats.med = rbind(stats.med,
+                  tibble(Time = '1 year',Type='Univariable',
+                   Estimate = modelout$indirect,
+                   Estimate_low = modelout$boot_ci[1],
+                   Estimate_high = modelout$boot_ci[2],
+                   Pval = modelout$boot_p,
+                   SE = modelout$boot_se)
+)
+
+# MULTIVARIABLE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Model <- '
+  # Mediation paths
+  ZInternalizingPercentile ~ ZShannonStool1Yr
+  ZShannonStool1Yr ~ ZPSS_36weeks
+
+  # Direct paths for the predictors
+  ZShannonStool1Yr ~ Mother_abs_birth_yn + csec + BF_dur
+'
+
+set.seed(421)
+Modelrun <- sem(Model, data=meta, fixed.x=TRUE, missing="ml")
+summary(Modelrun, standardized=TRUE,fit.measures=TRUE, rsquare=TRUE)
+
+
+ModelIE <- indirect_effect(x = "ZPSS_36weeks",
+                           y = "ZInternalizingPercentile",
+                           m = "ZShannonStool1Yr",
+                           fit = Modelrun,
+                           boot_ci = TRUE,
+                           R = 500,
+                           ncores=1,
+                           seed=421)
+
+modelout = print(ModelIE,pvalue=TRUE)
+
+stats.med = rbind(stats.med,
+                  tibble(Time = '1 year',Type='Multivariable',
+                   Estimate = modelout$indirect,
+                   Estimate_low = modelout$boot_ci[1],
+                   Estimate_high = modelout$boot_ci[2],
+                   Pval = modelout$boot_p,
+                   SE = modelout$boot_se)
+)
+```
+
+
+```{r Change}
+# UNIVARIABLE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Model <-'
+ZInternalizingPercentile ~ ZShannon_CHG 
+ZShannon_CHG ~ ZPSS_36weeks
+'
+
+set.seed(421)
+Modelrun <- sem(Model, data=meta, fixed.x=TRUE, missing="ml")
+summary(Modelrun, standardized=TRUE,fit.measures=TRUE, rsquare=TRUE)
+
+
+ModelIE <- indirect_effect(x = "ZPSS_36weeks",
+                           y = "ZInternalizingPercentile",
+                           m = "ZShannon_CHG",
+                           fit = Modelrun,
+                           boot_ci = TRUE,
+                           R = 500,
+                           ncores=1,
+                           seed=421)
+
+modelout = print(ModelIE,pvalue=TRUE)
+
+stats.med = rbind(stats.med,
+                  tibble(Time = 'Change',Type='Univariable',
+                   Estimate = modelout$indirect,
+                   Estimate_low = modelout$boot_ci[1],
+                   Estimate_high = modelout$boot_ci[2],
+                   Pval = modelout$boot_p,
+                   SE = modelout$boot_se)
+)
+
+# MULTIVARIABLE ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Model <- '
+  # Mediation paths
+  ZInternalizingPercentile ~ ZShannon_CHG
+  ZShannon_CHG ~ ZPSS_36weeks
+
+  # Direct paths for the predictors
+  ZShannon_CHG ~ ZShannonStool3mo + Mother_abs_birth_yn + csec + BF_dur
+'
+
+set.seed(421)
+Modelrun <- sem(Model, data=meta, fixed.x=TRUE, missing="ml")
+summary(Modelrun, standardized=TRUE,fit.measures=TRUE, rsquare=TRUE)
+
+
+ModelIE <- indirect_effect(x = "ZPSS_36weeks",
+                           y = "ZInternalizingPercentile",
+                           m = "ZShannon_CHG",
+                           fit = Modelrun,
+                           boot_ci = TRUE,
+                           R = 500,
+                           ncores=1,
+                           seed=421)
+
+modelout = print(ModelIE,pvalue=TRUE)
+
+stats.med = rbind(stats.med,
+                  tibble(Time = 'Change',Type='Multivariable',
+                   Estimate = modelout$indirect,
+                   Estimate_low = modelout$boot_ci[1],
+                   Estimate_high = modelout$boot_ci[2],
+                   Pval = modelout$boot_p,
+                   SE = modelout$boot_se)
+)
+```
+
+```{r Save stats}
+writexl::write_xlsx(list(Mediation=stats.med),'Table 2. Alpha diversity Mediation.xlsx')
+```
+

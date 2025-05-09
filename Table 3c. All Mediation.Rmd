@@ -1,0 +1,31 @@
+---
+title: "Figure 5. Differential Abundance - MetaCyc"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load stats}
+library(tidyverse)
+df1 = readxl::read_xlsx('Table 3a. Taxonomy Mediation.xlsx')
+df2 = readxl::read_xlsx('Table 3b. MetaCyc Mediation.xlsx')
+df = rbind(df1,df2)
+```
+
+```{r Format}
+df.formatted = df %>% 
+  group_by(Level,Type) %>% 
+  mutate(Padj = p.adjust(Pval,method='BH')) %>% ungroup() %>% 
+  mutate(`95% CI` = paste('[',signif(Estimate_low,2),',',signif(Estimate_high,2),']',sep=''),.after=Estimate) %>% 
+  select(-Estimate_low,-Estimate_high,-Time,-SE) %>% 
+  mutate(Taxon = ifelse(Level!='MetaCyc',str_sub(Taxon,start=4),Taxon)) %>% 
+  mutate(Estimate = signif(Estimate,2), Padj = signif(Padj,2)) %>% 
+  mutate(Test = ifelse(Level=='MetaCyc','Function','Taxonomy'),.before='Level') %>% 
+  pivot_wider(names_from = Type, values_from = c(Estimate,`95% CI`,Pval,Padj),names_sep = ' - ') %>% 
+  select(Test:Taxon,contains('Univar'),contains('Multivar'))
+```
+
+```{r Save table}
+writexl::write_xlsx(list(df.formatted),'Table 3c. All Mediation.xlsx')
+```
+

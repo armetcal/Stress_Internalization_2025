@@ -1,0 +1,153 @@
+---
+title: "Figure 1. Alpha Diversity"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(phyloseq)
+library(ggpubr)
+library(vegan)
+
+meta = haven::read_sav('../Data/CHILD_CBCL_MatDistress_Microbiome_09042024_ForAvril.sav')
+ps = readRDS('../CHILD_phyloseq_Feb25.rds')
+
+# Fix here because it's not working in the phyloseq creation script
+meta$csec[meta$csec=='NA'] = NA
+meta$csec[meta$csec==''] = NA
+table(is.na(meta$csec))
+table(meta$csec)
+
+meta$Mother_abs_birth_yn[meta$Mother_abs_birth_yn=='NA'] = NA
+meta$Mother_abs_birth_yn[meta$Mother_abs_birth_yn==''] = NA
+table(is.na(meta$Mother_abs_birth_yn))
+table(meta$Mother_abs_birth_yn)
+
+# Fix breast milk variables
+meta$bf_3m = sapply(meta$BF_3m_status_4, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='',NA,
+                                   ifelse(x=='Never breastfed','No', ifelse(x=='Zero','Prev','Yes')))))
+})
+meta$bf_3m = factor(meta$bf_3m, levels = c('No','Prev','Yes'))
+meta$bf_3m_bool = meta$bf_3m
+meta$bf_3m_bool[meta$bf_3m_bool=='Prev'] = 'No'
+meta$BF_12m[meta$BF_12m=='' | meta$BF_12m=='NA'] = NA
+meta$BF_dur = sapply(meta$BF_dur_cat2, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='Never breastfed',0,
+                                   ifelse(x=='>0-3',1, ifelse(x=='3-9',2,ifelse(x=='9-12',3,4))))))
+})
+meta = meta %>% droplevels()
+```
+
+# ALPHA DIVERSITY
+
+```{r Prep Data}
+df0 = meta %>% select(Participant_ID, Dyad_ID, ShannonStool3mo, ShannonStool1Yr) 
+df = df0 %>% 
+  mutate(change = ShannonStool1Yr - ShannonStool3mo) %>% 
+  pivot_longer(cols = c(ShannonStool3mo, ShannonStool1Yr),
+               names_to = 'Time', values_to = 'alpha') %>% 
+  filter(!is.na(alpha)) %>% 
+  mutate(Time = ifelse(Time=='ShannonStool3mo', '3 months','1 year')) %>% 
+  mutate(Time = factor(.$Time, levels = c('3 months','1 year')))
+```
+
+```{r Calculate means and SD}
+# Stats per timepoint
+means = df %>% group_by(Time) %>% 
+  filter(!is.na(alpha)) %>% 
+  summarize(n = n(),Mean = round(mean(alpha),2), SD = round(sd(alpha),2))
+
+# Add stats for change in diversity
+temp = df %>% select(contains('_ID'),change) %>% filter(!is.na(change)) %>% unique() %>% 
+  summarize(n = n(),Mean = round(mean(change),2), SD = round(sd(change),2)) %>% 
+  mutate(Time = 'Change', .before = Mean)
+means = rbind(means, temp)
+```
+
+```{r Pval of change}
+library(lme4)
+library(lmerTest)
+
+p = lmer(formula = alpha ~ Time + (1|Dyad_ID), 
+           data = df,
+           REML=F,
+           control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000))) %>% 
+    # Format results
+    summary %>% .$coefficients %>% as.data.frame() %>% rownames_to_column('Variable')
+```
+
+```{r Plot alpha diversity change}
+p = df %>% ggplot(aes(Time,alpha)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(height=0, width = 0.2,size=0.5) +
+  # geom_line(aes(group=Dyad_ID)) +
+  theme_classic(base_size=18) +
+  ylab('Alpha Diversity') +
+  xlab('Timepoint') +
+  scale_y_continuous(expand = expansion(mult=c(0.05,0.1))) +
+  annotate('text',x=1.5,y=4,label='Mixed Model: P<0.001',size=5)
+p
+```
+
+# BETA DIVERSITY
+
+```{r Calculate metric}
+psmeta = ps@sam_data %>% as.matrix() %>% as.data.frame() %>% 
+  rownames_to_column('Sample') %>% as.data.frame() %>% 
+  select(Sample,Participant_ID,Dyad_ID,Visit)
+
+otu = ps %>% .@otu_table %>% as.matrix %>% as.data.frame()
+otut = otu %>% t() 
+# Calculate the distance matrix:
+beta_distt <- vegdist(otut, index = 'bray')
+# Scaling results with NMDS
+# set.seed(421)
+# mdst <- metaMDS(beta_distt)
+# saveRDS(mdst,'../Data/metaMDS.rds')
+mdst = readRDS('../Data/metaMDS.rds')
+# Extract PCoA axes and format
+mds_datat <- as.data.frame(mdst$points)
+mds_datat$`Sample` <- rownames(mds_datat)
+mds_datat <- mds_datat %>% left_join(meta %>% left_join(psmeta)) %>% 
+  mutate(beta_type = 'Bray-Curtis')
+```
+
+
+```{r PERMANOVA}
+stats = adonis2(beta_distt ~ Visit, data = mds_datat, method='bray',by='margin') %>% 
+  broom::tidy() %>% mutate(Test = 'Timepoint',.before='term')
+
+stats.paired = adonis2(beta_distt ~ Visit, data = mds_datat, strata = mds_datat$Dyad_ID,
+                       method='bray',by='margin') %>% 
+  broom::tidy() %>% mutate(Test = 'Timepoint',.before='term')
+```
+
+```{r Beta Plot}
+p1 = mds_datat %>% 
+  mutate(Visit = ifelse(Visit=='3month','3 months',ifelse(Visit=='1year','1 year',NA))) %>% 
+  mutate(Visit = factor(.$Visit, levels = c('3 months','1 year'))) %>% 
+  ggplot(aes(x = MDS1, y = MDS2, color = Visit)) +
+    geom_point(size = 0.5) + 
+    stat_ellipse(size = 1) +
+    theme_classic(base_size = 20) + 
+    xlab('NMDS 1') + ylab('NMDS 2') +
+  guides(color = guide_legend(title = "Timepoint")) +
+  scale_y_continuous(expand = expansion(mult=c(0,0.2))) +
+  annotate('text',x=0,y=1.1,hjust=0.5,label='PERMANOVA: P<0.001',size=5)
+p1
+```
+# COMBINE INTO FIGURE
+
+```{r}
+library(cowplot)
+ggarrange(plotlist = list(p,p1),widths = c(2,3)) +
+  theme(plot.margin = margin(1,0.1,1,2, "cm")) +
+  draw_label(label="A",x=-0.015,y=1, fontface = "bold", size = 30) +
+  draw_label(label="B",x=0.43,y=1, fontface = "bold", size = 30)
+ggsave('Figure 1. Diversity across timepoints.pdf',height=4, width=10,dpi=600)
+ggsave('Figure 1. Diversity across timepoints.jpeg',height=4, width=10,dpi=600)
+```
+

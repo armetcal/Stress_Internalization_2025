@@ -1,0 +1,246 @@
+---
+title: "Figure 5. Differential Abundance - MetaCyc"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(phyloseq)
+library(ggpubr)
+library(lavaan)
+library(manymome)
+library(haven)
+library(Maaslin2)
+
+meta = read_sav('../Data/CHILD_CBCL_MatDistress_Microbiome_09042024_ForAvril.sav')
+ps = readRDS('../CHILD_phyloseq_Feb25_metacyc.rds')
+ps@sam_data$depth = sample_sums(ps)
+
+# Fix here because it's not working in the phyloseq creation script
+ps@sam_data$csec[ps@sam_data$csec=='NA'] = NA
+ps@sam_data$csec[ps@sam_data$csec==''] = NA
+table(is.na(ps@sam_data$csec))
+table(ps@sam_data$csec)
+
+ps@sam_data$Mother_abs_birth_yn[ps@sam_data$Mother_abs_birth_yn=='NA'] = NA
+ps@sam_data$Mother_abs_birth_yn[ps@sam_data$Mother_abs_birth_yn==''] = NA
+table(is.na(ps@sam_data$Mother_abs_birth_yn))
+table(ps@sam_data$Mother_abs_birth_yn)
+
+# Fix breast milk variables
+ps@sam_data$bf_3m = sapply(ps@sam_data$BF_3m_status_4, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='',NA,
+                                   ifelse(x=='Never breastfed','No', ifelse(x=='Zero','Prev','Yes')))))
+})
+ps@sam_data$bf_3m = factor(ps@sam_data$bf_3m, levels = c('No','Prev','Yes'))
+ps@sam_data$bf_3m_bool = ps@sam_data$bf_3m
+ps@sam_data$bf_3m_bool[ps@sam_data$bf_3m_bool=='Prev'] = 'No'
+ps@sam_data$BF_12m[ps@sam_data$BF_12m=='' | ps@sam_data$BF_12m=='NA'] = NA
+ps@sam_data$BF_dur = sapply(ps@sam_data$BF_dur_cat2, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='Never breastfed',0,
+                                   ifelse(x=='>0-3',1, ifelse(x=='3-9',2,ifelse(x=='9-12',3,4))))))
+})
+
+psmeta = prune_taxa(taxa_names(ps)[1],ps) %>% psmelt()
+```
+
+```{r}
+# Maaslin adds Xs to the ASV names if they start with numbers. Need to pre-emptively add an X,
+# otherwise we won't know which ones need to have the X removed.
+psx = ps
+taxa_names(psx) = paste0('X',taxa_names(psx),sep='')
+
+psx@sam_data = prune_taxa(taxa_names(psx)[1],psx) %>% psmelt() %>% 
+  select(-OTU,-Abundance,-Species) %>% 
+  left_join(psmeta %>% select(Sample,BF_dur,bf_3m_bool) %>% unique()) %>% 
+  column_to_rownames('Sample') %>% sample_data()
+```
+
+```{r Maaslin2 function}
+run_maaslin = function(ps, level, pred, covars=NA, prev=0.1, abun=0, group = NA) {
+  # ps = temp
+  # pred = 'PSS_36weeks'; covars = c('csec','Mother_abs_birth_yn')
+  # prev=0.1; abun=0; group = NA
+  otu = ps@otu_table %>% as.matrix %>% as.data.frame()
+  s = prune_taxa(taxa_names(ps)[1],ps) %>% psmelt() %>% as.data.frame() %>% `rownames<-`(.$Sample) 
+  tax = ps@tax_table %>% as.data.frame() %>% rownames_to_column('feature')
+  if(!(NA %in% covars)) pred = c(pred,covars)
+  maas = Maaslin2(otu,
+                  s,
+                  output='maaslin_temp',
+                  fixed_effects=pred,
+                  normalization = "TSS", transform = "AST", analysis_method = "LM",
+                  max_significance = 0.05,correction = "BH",
+                  min_prevalence = prev, min_abundance = abun,
+                  plot_heatmap=F, plot_scatter=F,save_models=F)
+  res = maas$results %>% left_join(tax) %>% 
+    select(all_of(names(tax)), metadata, value, coef:pval,qval) %>% 
+    mutate(Level = level, Group = group,
+           Test = ifelse(NA %in% covars,'Univariable','Multivariable'),
+           Predictor = pred[1], Covars = paste(covars,collapse=', '),
+           .before = 'feature') %>% 
+    mutate(prev_cut = prev, abun_cut = abun) %>% 
+    mutate(sig = as.numeric(qval<0.05),.after=qval)
+  return(res)
+}
+```
+
+# Run Stats
+
+```{r}
+stats.maas = tibble()
+```
+
+```{r 3 months}
+temp = psx %>% subset_samples(Visit=='3month')
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='PSS_36weeks',
+                                              covars=NA,prev=0.1,abun=0,group='3 months'))
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='PSS_36weeks',
+                                              covars=c('csec','Mother_abs_birth_yn','bf_3m_bool','depth'),
+                                              prev=0.1,abun=0,group='3 months'))
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='InternalizingPercentile',
+                                              covars=NA,prev=0.1,abun=0,group='3 months'))
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='InternalizingPercentile',
+                                              covars=c('csec','Mother_abs_birth_yn','bf_3m_bool','depth'),
+                                              prev=0.1,abun=0,group='3 months'))
+```
+
+```{r 1 year}
+temp = psx %>% subset_samples(Visit=='1year')
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='PSS_36weeks',
+                                              covars=NA,prev=0.1,abun=0,group='1 year'))
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='PSS_36weeks',
+                                              covars=c('csec','Mother_abs_birth_yn','BF_dur','depth'),
+                                              prev=0.1,abun=0,group='1 year'))
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='InternalizingPercentile',
+                                              covars=NA,prev=0.1,abun=0,group='1 year'))
+stats.maas = bind_rows(stats.maas,run_maaslin(temp,level='MetaCyc',pred='InternalizingPercentile',
+                                              covars=c('csec','Mother_abs_birth_yn','BF_dur','depth'),
+                                              prev=0.1,abun=0,group='1 year'))
+```
+
+```{r Combine}
+# stats.maas = readxl::read_xlsx('Figure 5. Differential Abundance - MetaCyc.xlsx')
+
+stats.filt = stats.maas %>% 
+  filter(sig==1, metadata == Predictor)
+```
+
+```{r Which pathways are essentially the same?}
+otu = prune_taxa(taxa_sums(psx)>0,psx %>% subset_samples(Visit=='1year')) %>% 
+  microbiome::transform('compositional')
+taxa_names(otu) = str_replace_all(taxa_names(otu),'-','.') %>% str_replace_all('[+]','.')
+otu = prune_taxa(stats.filt$feature,otu)
+length(unique(stats.filt$feature)) == ntaxa(otu) # all taxa present
+otu = otu@otu_table %>% as.matrix() %>% t()
+otu_cor = cor(otu,method='spearman') 
+
+library(pheatmap)
+ph = pheatmap(otu_cor, clustering_distance_rows = "euclidean", clustering_distance_cols = "euclidean")
+save_pheatmap_pdf <- function(x, filename, width=7, height=7) {
+    stopifnot(!missing(x))
+    stopifnot(!missing(filename))
+    pdf(filename, width=width, height=height)
+    grid::grid.newpage()
+    grid::grid.draw(x$gtable)
+    dev.off()
+}
+save_pheatmap_pdf(ph,'Figure S1. Supp Figure - Similar Pathways.pdf',height=8, width=10)
+
+cor_df = otu_cor %>% as.data.frame() %>% 
+  rownames_to_column('PWY1') %>% 
+  pivot_longer(cols = -PWY1, names_to = 'PWY2',values_to = 'cor') %>% 
+  filter(PWY1!=PWY2) %>% 
+  filter(cor>0.9) %>% 
+  group_by(PWY1) %>% add_count() %>% ungroup() %>% 
+  arrange(-n)
+cor_df$group[cor_df$PWY1=='XPWY.5845' | cor_df$PWY2=='XPWY.5845'] = 'Menaquinol biosynthesis'
+cor_df$group[cor_df$PWY1=='XPWY.5860' | cor_df$PWY2=='XPWY.5860'] = 'Menaquinol biosynthesis'
+cor_df$group[cor_df$PWY1=='XPWY.5850' | cor_df$PWY2=='XPWY.5850'] = 'Menaquinol biosynthesis'
+cor_df$group[cor_df$PWY1=='XPWY.5862' | cor_df$PWY2=='XPWY.5862'] = 'Menaquinol biosynthesis'
+
+cor_df$group[cor_df$PWY1=='XPWY.5121' | cor_df$PWY2=='XPWY.5121'] = 'Methylerythritol phosphate pathway'
+cor_df$group[cor_df$PWY1=='XPWY.7560' | cor_df$PWY2=='XPWY.7560'] = 'Methylerythritol phosphate pathway'
+cor_df$group[cor_df$PWY1=='XHEME.BIOSYNTHESIS.II' | cor_df$PWY2=='XHEME.BIOSYNTHESIS.II'] = 'Heme biosynthesis II'
+cor_df$group[cor_df$PWY1=='XHEME.BIOSYNTHESIS.II.1' | cor_df$PWY2=='XHEME.BIOSYNTHESIS.II.1'] = 'Heme biosynthesis II v2'
+cor_df$group[cor_df$PWY1=='XPWY.5097' | cor_df$PWY2=='XPWY.5097'] = 'Lysine biosynthesis'
+
+cor_df = cor_df %>% select(PWY1,group)
+```
+
+```{r Annotate other pathways}
+annot = stats.filt %>% select(feature) %>% unique() %>% 
+  left_join(cor_df %>% rename(feature=PWY1))
+
+annot$group[annot$feature== 'XGOLPDLCAT.PWY'] = 'Glycerol degradation'
+annot$group[annot$feature== 'XPWY.7221'] = 'Guanosine ribonucleotide biosynthesis'
+annot$group[annot$feature== 'XARG.POLYAMINE.SYN'] = 'Arg/polyamine biosynthesis'
+annot$group[annot$feature== 'XGLUDEG.I.PWY'] = 'GABA shunt'
+annot$group[annot$feature== 'XPWY.7761'] = 'NAD salvage'
+annot$group[annot$feature== 'XDTDPRHAMSYN.PWY'] = 'dTDP-L-rhamnose biosynthesis'
+annot$group[annot$feature== 'XANAGLYCOLYSIS.PWY'] = 'Glycolysis III'
+annot$group[annot$feature== 'XPWY.7883'] = 'Peptidoglycan recycling II'
+annot$group[annot$feature== 'XPWY0.1241'] = 'ADP-L-glycero-β-D-manno-heptose biosynthesis'
+annot$group[annot$feature== 'XPWY.822'] = 'Fructan biosynthesis'
+annot$group[annot$feature== 'XPWY.5920'] = 'Heme biosynthesis'
+annot$group[annot$feature== 'XPWY.5136'] = 'Fatty Acid Oxidation'
+annot$group[annot$feature== 'XFAO.PWY'] = 'Fatty Acid Oxidation'
+annot$group[annot$feature== 'XCALVIN.PWY'] = 'Calvin Cycle'
+```
+
+# Plots 
+
+```{r Dot plot}
+temp0 = stats.filt %>% #filter(Group=='1 year') %>% 
+  left_join(annot) %>% 
+  arrange(coef) %>%
+  mutate(feature = str_sub(feature,start=2)) # Remove X prefix
+temp = stats.maas %>%  
+  left_join(annot) %>% 
+  mutate(feature = str_sub(feature,start=2)) %>%  # Remove X prefix
+  filter(Predictor==metadata) %>% 
+  filter(feature %in% temp0$feature) %>% 
+  mutate(feature = str_wrap(feature,40)) %>% 
+  mutate(Test = factor(.$Test, levels = c('Univariable','Multivariable'))) %>% 
+  mutate(Group = factor(.$Group, levels = c('3 months','1 year'))) %>% 
+  mutate(Predictor = ifelse(Predictor=='PSS_36weeks','PSS','IP')) %>% 
+  mutate(Predictor = factor(.$Predictor, levels = c('PSS','IP'))) %>% 
+  mutate(feature = factor(.$feature, levels = unique(temp0$feature))) %>%  
+  mutate(group = factor(.$group, levels = unique(temp0$group))) %>%  
+  mutate(Qval = ifelse(qval>0.05,'',
+                       ifelse(qval>0.01,'*',
+                              ifelse(qval>0.001,'**',
+                                     ifelse(qval<=0.001,'***',''))))) %>% 
+  mutate(Qval2 = ifelse(qval>0.1,'',
+                        ifelse(qval>0.05,'+',''))) %>% 
+  rename('Estimate' = coef)
+
+# Dot plot of estimates.
+plot = temp %>%
+  ggplot(aes(Test,feature,col=Estimate)) +
+  geom_point(size=9) +
+  theme_classic(base_size=18) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  ylab(NULL) + xlab(NULL) +
+  ggh4x::facet_nested(group~Group+Predictor,scales = 'free',space = 'free',
+               strip = ggh4x::strip_nested(size = "variable")) +
+  theme(strip.text.y.right = element_text(angle = 0)) +
+  theme(axis.text.x = element_text(angle = 30, vjust = 1.2, hjust=1)) +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25) +
+  geom_text(aes(label=Qval2),size = 12, col = 'white',nudge_y = 0)
+
+plot
+```
+
+# Save
+
+```{r}
+ggsave('Figure 3. Differential Abundance - MetaCyc.pdf',plot = plot, height=12,width=14.5,dpi=600)
+ggsave('Figure 3. Differential Abundance - MetaCyc.jpeg',plot = plot, height=12,width=14.5,dpi=600)
+```
+
+```{r Save stats}
+writexl::write_xlsx(list(Mediation=stats.maas,Annotations=annot),'Figure 3. Differential Abundance - MetaCyc.xlsx')
+```

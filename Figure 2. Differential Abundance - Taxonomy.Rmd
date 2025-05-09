@@ -1,0 +1,258 @@
+---
+title: "3. Maaslin2"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(phyloseq)
+library(ggpubr)
+library(lavaan)
+library(manymome)
+library(haven)
+library(Maaslin2)
+
+meta = read_sav('../Data/CHILD_CBCL_MatDistress_Microbiome_09042024_ForAvril.sav')
+ps = readRDS('../CHILD_phyloseq_Feb25.rds')
+
+# Fix here because it's not working in the phyloseq creation script
+ps@sam_data$csec[ps@sam_data$csec=='NA'] = NA
+ps@sam_data$csec[ps@sam_data$csec==''] = NA
+table(is.na(ps@sam_data$csec))
+table(ps@sam_data$csec)
+
+ps@sam_data$Mother_abs_birth_yn[ps@sam_data$Mother_abs_birth_yn=='NA'] = NA
+ps@sam_data$Mother_abs_birth_yn[ps@sam_data$Mother_abs_birth_yn==''] = NA
+table(is.na(ps@sam_data$Mother_abs_birth_yn))
+table(ps@sam_data$Mother_abs_birth_yn)
+
+# Fix breast milk variables
+ps@sam_data$bf_3m = sapply(ps@sam_data$BF_3m_status_4, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='',NA,
+                                   ifelse(x=='Never breastfed','No', ifelse(x=='Zero','Prev','Yes')))))
+})
+ps@sam_data$bf_3m = factor(ps@sam_data$bf_3m, levels = c('No','Prev','Yes'))
+ps@sam_data$bf_3m_bool = ps@sam_data$bf_3m
+ps@sam_data$bf_3m_bool[ps@sam_data$bf_3m_bool=='Prev'] = 'No'
+ps@sam_data$BF_12m[ps@sam_data$BF_12m=='' | ps@sam_data$BF_12m=='NA'] = NA
+ps@sam_data$BF_dur = sapply(ps@sam_data$BF_dur_cat2, function(x){
+  return(ifelse(is.na(x),NA,ifelse(x=='Never breastfed',0,
+                                   ifelse(x=='>0-3',1, ifelse(x=='3-9',2,ifelse(x=='9-12',3,4))))))
+})
+
+psmeta = prune_taxa(taxa_names(ps)[1],ps) %>% psmelt()
+```
+
+```{r}
+# Maaslin adds Xs to the ASV names if they start with numbers. Need to pre-emptively add an X,
+# otherwise we won't know which ones need to have the X removed.
+psx = ps
+taxa_names(psx) = paste0('X',taxa_names(psx),sep='')
+
+psx@tax_table[,'ASV'] = paste0('X',psx@tax_table[,'ASV'])
+
+# Tax_glom 
+# temp = psx; temp@tax_table = temp@tax_table[,c('Kingdom','Phylum')]
+# saveRDS(temp %>% tax_glom("Phylum"),'../Data/tax_glom/phylum.rds')
+# temp = psx; temp@tax_table = temp@tax_table[,c('Kingdom','Family')]
+# saveRDS(psx %>% tax_glom("Family"),'../Data/tax_glom/family.rds')
+# temp = psx; temp@tax_table = temp@tax_table[,c('Kingdom','Genus')]
+# saveRDS(psx %>% tax_glom("Genus"),'../Data/tax_glom/genus.rds')
+# temp = psx; temp@tax_table = temp@tax_table[,c('Kingdom','lowest_level')]
+# saveRDS(psx %>% tax_glom("lowest_level"),'../Data/tax_glom/lowest_level.rds')
+
+p = readRDS('../Data/tax_glom/phylum.rds')
+g = readRDS('../Data/tax_glom/genus.rds')
+
+p@sam_data = prune_taxa(taxa_names(p)[1],p) %>% psmelt() %>% select(-OTU,-Abundance,-c(Kingdom:Phylum)) %>% 
+  left_join(psmeta %>% select(Sample,BF_dur,bf_3m_bool) %>% unique()) %>% 
+  mutate(depth = sample_sums(p)) %>% 
+  column_to_rownames('Sample') %>% sample_data()
+
+g@sam_data = prune_taxa(taxa_names(g)[1],g) %>% psmelt() %>%  
+  select(-OTU,-Abundance,-c(Kingdom:Genus)) %>% 
+  left_join(psmeta %>% select(Sample,BF_dur,bf_3m_bool) %>% unique()) %>% 
+  mutate(depth = sample_sums(g)) %>% 
+  column_to_rownames('Sample') %>% sample_data()
+```
+
+```{r Maaslin2 function}
+run_maaslin = function(ps, level, pred, covars=NA, prev=0.1, abun=0, group = NA) {
+  # ps = temp
+  # pred = 'PSS_36weeks'; covars = c('csec','Mother_abs_birth_yn')
+  # prev=0.1; abun=0; group = NA
+  otu = ps@otu_table %>% as.matrix %>% as.data.frame()
+  s = prune_taxa(taxa_names(ps)[1],ps) %>% psmelt() %>% as.data.frame() %>% `rownames<-`(.$Sample) 
+  tax = ps@tax_table %>% as.data.frame() %>% rownames_to_column('feature')
+  if(!(NA %in% covars)) pred = c(pred,covars)
+  maas = Maaslin2(otu,
+                  s,
+                  output='maaslin_temp',
+                  fixed_effects=pred,
+                  normalization = "TSS", transform = "AST", analysis_method = "LM",
+                  max_significance = 0.05,correction = "BH",
+                  min_prevalence = prev, min_abundance = abun,
+                  plot_heatmap=F, plot_scatter=F,save_models=F)
+  res = maas$results %>% left_join(tax) %>% 
+    select(all_of(names(tax)), metadata, value, coef:pval,qval) %>% 
+    mutate(Level = level, Group = group,
+           Test = ifelse(NA %in% covars,'Univariable','Multivariable'),
+           Predictor = pred[1], Covars = paste(covars,collapse=', '),
+           .before = 'feature') %>% 
+    mutate(prev_cut = prev, abun_cut = abun) %>% 
+    mutate(sig = as.numeric(qval<0.05),.after=qval)
+  return(res)
+}
+```
+
+# Run Stats
+
+```{r}
+stats.maas.g = tibble()
+stats.maas.p = tibble()
+```
+
+# 3 months
+
+```{r Genus}
+temp = g %>% subset_samples(Visit=='3month')
+
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='PSS_36weeks',
+                                     covars=NA,prev=0.1,abun=0,group='3 months'))
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='PSS_36weeks',
+                                     covars=c('csec','Mother_abs_birth_yn','bf_3m_bool','depth'),
+                                     prev=0.1,abun=0,group='3 months'))
+
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='InternalizingPercentile',
+                                     covars=NA,prev=0.1,abun=0,group='3 months'))
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='InternalizingPercentile',
+                                     covars=c('csec','Mother_abs_birth_yn','bf_3m_bool','depth'),
+                                     prev=0.1,abun=0,group='3 months'))
+```
+
+```{r Phylum}
+temp = p %>% subset_samples(Visit=='3month')
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='PSS_36weeks',
+                                     covars=NA,prev=0.1,abun=0,group='3 months'))
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='PSS_36weeks',
+                                     covars=c('csec','Mother_abs_birth_yn','bf_3m_bool','depth'),
+                                     prev=0.1,abun=0,group='3 months'))
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='InternalizingPercentile',
+                                     covars=NA,prev=0.1,abun=0,group='3 months'))
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='InternalizingPercentile',
+                                     covars=c('csec','Mother_abs_birth_yn','bf_3m_bool','depth'),
+                                     prev=0.1,abun=0,group='3 months'))
+```
+
+# 1 Year
+
+```{r Genus}
+temp = g %>% subset_samples(Visit=='1year')
+
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='PSS_36weeks',
+                                     covars=NA,prev=0.1,abun=0,group='1 year'))
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='PSS_36weeks',
+                                     covars=c('csec','Mother_abs_birth_yn','BF_dur','depth'),
+                                     prev=0.1,abun=0,group='1 year'))
+
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='InternalizingPercentile',
+                                     covars=NA,prev=0.1,abun=0,group='1 year'))
+stats.maas.g = bind_rows(stats.maas.g,
+                         run_maaslin(temp,level='Genus',pred='InternalizingPercentile',
+                                     covars=c('csec','Mother_abs_birth_yn','BF_dur','depth'),
+                                     prev=0.1,abun=0,group='1 year'))
+```
+
+```{r Phylum}
+temp = p %>% subset_samples(Visit=='1year')
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='PSS_36weeks',
+                                     covars=NA,prev=0.1,abun=0,group='1 year'))
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='PSS_36weeks',
+                                     covars=c('csec','Mother_abs_birth_yn','BF_dur','depth'),
+                                     prev=0.1,abun=0,group='1 year'))
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='InternalizingPercentile',
+                                     covars=NA,prev=0.1,abun=0,group='1 year'))
+stats.maas.p = bind_rows(stats.maas.p,
+                         run_maaslin(temp,level='Phylum',pred='InternalizingPercentile',
+                                     covars=c('csec','Mother_abs_birth_yn','BF_dur','depth'),
+                                     prev=0.1,abun=0,group='1 year'))
+```
+
+```{r Combine}
+stats.maas = full_join(stats.maas.p,stats.maas.g) %>% 
+  mutate(taxon = ifelse(Level=='Phylum',Phylum,Genus))
+
+stats.filt = stats.maas %>% 
+  filter(sig==1, metadata == Predictor)
+```
+
+# Plots 
+
+```{r Dot plot}
+# Determine ordering
+temp0 = stats.filt %>% 
+  filter(Predictor=='PSS_36weeks',Group=='1 year') %>% 
+  arrange(coef)
+# Format data
+temp = stats.maas %>% 
+  filter(Predictor==metadata) %>% 
+  filter(taxon %in% temp0$taxon) %>% 
+  mutate(taxon = str_wrap(taxon,40)) %>% 
+  mutate(Test = factor(.$Test, levels = c('Univariable','Multivariable'))) %>% 
+  mutate(Group = factor(.$Group, levels = c('3 months','1 year'))) %>% 
+  mutate(Predictor = ifelse(Predictor=='PSS_36weeks','PSS','IP')) %>% 
+  mutate(Predictor = factor(.$Predictor, levels = c('PSS','IP'))) %>% 
+  mutate(Level = factor(.$Level, levels = c('Phylum','Genus'))) %>% 
+  mutate(taxon = factor(.$taxon, levels = unique(temp0$taxon))) %>%  
+  mutate(Qval = ifelse(qval>0.05,'',
+                       ifelse(qval>0.01,'*',
+                              ifelse(qval>0.001,'**',
+                                     ifelse(qval<=0.001,'***',''))))) %>% 
+  mutate(Qval2 = ifelse(qval>0.1,'',
+                        ifelse(qval>0.05,'+',''))) %>% 
+  rename('Estimate' = coef) %>% 
+  filter(Level %in% c('Phylum','Genus'))
+
+# Dot plot of estimates. Include IP for comparison.
+plot = temp %>%
+  ggplot(aes(Test,taxon,col=Estimate)) +
+  geom_point(size=9) +
+  theme_classic(base_size=18) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  ylab(NULL) + xlab(NULL) +
+  ggh4x::facet_nested(Level~Group+Predictor,scales = 'free',space = 'free',
+               strip = ggh4x::strip_nested(size = "variable")) +
+  theme(strip.text.y.right = element_text(angle = 0)) +
+  theme(axis.text.x = element_text(angle = 30, vjust = 1.2, hjust=1)) +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25) +
+  geom_text(aes(label=Qval2),size = 12, col = 'white',nudge_y = 0)
+
+plot
+```
+
+# Save Plot
+
+```{r}
+ggsave('Figure 2. Differential Abundance - Taxonomy.pdf',plot = plot, height=5,width=10,dpi=600)
+ggsave('Figure 2. Differential Abundance - Taxonomy.jpeg',plot = plot, height=5,width=10,dpi=600)
+```
+
+```{r Save stats}
+writexl::write_xlsx(list(Mediation=stats.maas),'Figure 2. Differential Abundance - Taxonomy.xlsx')
+```
